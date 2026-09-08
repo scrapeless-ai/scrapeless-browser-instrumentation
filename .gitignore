@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaging
+dist/
+build/
+*.egg-info/
+
+# Test caches
+.pytest_cache/
+
+# Trace artifacts from runs
+traces/
+*.sanitized.json
+
+# Secrets
+.env
+
+# Recon capture output (real target data, not project source)
+creepjs-recon/
+shape-recon/
+
+# Screenshot artifacts dropped at repo root by demo/test runs
+sbi-shot-*.png

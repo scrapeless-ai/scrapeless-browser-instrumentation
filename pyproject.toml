@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrapeless-browser-instrumentation"
+version = "1.3.0"
+description = "Stealth CDP runtime instrumentation for reverse-engineering hostile client-side JavaScript (anti-bot, captcha, fingerprinting) running in the Scrapeless cloud browser."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "sbi contributors" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Topic :: Software Development :: Debuggers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+mcp = [
+    "mcp>=1.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/scrapeless-ai/scrapeless-browser-instrumentation"
+Repository = "https://github.com/scrapeless-ai/scrapeless-browser-instrumentation.git"
+Issues = "https://github.com/scrapeless-ai/scrapeless-browser-instrumentation/issues"
+Changelog = "https://github.com/scrapeless-ai/scrapeless-browser-instrumentation/blob/main/CHANGELOG.md"
+
+[project.scripts]
+sbi = "sbi.__main__:main"
+
+[tool.setuptools]
+packages = [
+    "sbi",
+    "sbi.core",
+    "sbi.hooks",
+    "sbi.analysis",
+    "sbi.deobfuscate",
+    "sbi.verify",
+    "sbi.page",
+    "sbi.artifacts",
+]

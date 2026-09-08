@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Node executes the offline-verify and probe-js snippets in the test
+      # suite; those tests skip cleanly when node is absent, but CI installs
+      # it so they actually run.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Byte-compile everything
+        run: python -m compileall -q sbi tests examples
+
+      - name: Run offline test suite
+        run: python -m unittest discover -s tests -v
+
+  live:
+    name: live (real Chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      # ubuntu-latest ships Google Chrome stable; the battery also validates
+      # the UA masking (HeadlessChrome override) on this runner
+      - name: Start headless Chrome
+        run: |
+          google-chrome --headless=new --remote-debugging-port=9222 \
+            --user-data-dir=/tmp/sbi-chrome --no-first-run --no-default-browser-check \
+            about:blank &
+          sleep 4
+
+      - name: Run live tests
+        run: python -m unittest tests.test_live -v
+
+      - name: Run example battery
+        run: python scripts/live_battery.py --port 9222
+
+  live-windows:
+    name: live (Windows + real Chrome)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Start headless Chrome
+        shell: pwsh
+        run: |
+          Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+            -ArgumentList '--headless=new','--remote-debugging-port=9222',`
+              '--user-data-dir=C:\sbi-chrome','--no-first-run','--no-default-browser-check','about:blank'
+          Start-Sleep -Seconds 6
+
+      - name: Run live tests
+        run: python -m unittest tests.test_live -v
+
+  lint-lite:
+    name: lint-lite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -e .
+
+      - name: Byte-compile everything
+        run: python -m compileall -q sbi tests examples
+
+      - name: Import smoke check
+        run: python -c "import sbi; print(sbi.__version__)"
