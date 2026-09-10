@@ -176,8 +176,19 @@ class CDP:
     async def _send(self, msg):
         fut = self._loop.create_future()
         self._pending[msg["id"]] = fut
-        await self._ws.send(json.dumps(msg))
-        return await fut
+        try:
+            await self._ws.send(json.dumps(msg))
+            return await fut
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # the socket went away under us (a close or drop mid-send): resolve
+            # to an error result instead of letting this task finish with an
+            # exception no one retrieves — asyncio otherwise logs that as a
+            # loud traceback on every normal close. send() turns it into a
+            # CDPError for the caller, same as any other error reply.
+            self._pending.pop(msg["id"], None)
+            return {"error": {"code": -1, "message": f"CDP connection closed: {e}"}}
 
     def _dispatch_raw(self, raw):
         try:

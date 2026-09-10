@@ -100,6 +100,7 @@ class Session:
         self._dialogs = dialogs_mod.Dialogs(cdp)
         self._agents = agent_mod.Agents(cdp)
         self.interceptor = intercept_mod.Interceptor(cdp)
+        self._emulation = []            # (method, kwargs) replay log for reconnect
 
     def start(self):
         self.engine.start()
@@ -390,6 +391,14 @@ class Session:
     def network_records(self):
         return self.network.drain()
 
+    def observed_requests(self):
+        """Drain requests seen at the Fetch layer — real request headers and
+        post bodies included. Arm a passthrough rule first so the pauses fire:
+        `s.intercept("*", passthrough=True)`. This recovers request-side values
+        (signed headers, form fields) even when the gateway strips them from
+        Network-domain output."""
+        return self.interceptor.drain_observed()
+
     def console(self):
         """Drain console messages + uncaught exceptions seen so far."""
         return self._console.drain()
@@ -455,36 +464,52 @@ class Session:
     # -- emulation (per-session, in-page visible; can conflict with the
     #    gateway's own fingerprint stack — caller's choice) -------------------
 
+    def _remember_emulation(self, method, **kwargs):
+        # ordered log so reconnect() can replay overrides that would otherwise
+        # be lost with the old session; order is preserved so set-then-clear
+        # reproduces the same final state
+        self._emulation.append((method, kwargs))
+
     def emulate_ua(self, user_agent, metadata=None, session=None):
+        self._remember_emulation("emulate_ua", user_agent=user_agent,
+                                 metadata=metadata, session=session)
         emulation_mod.set_user_agent(self.cdp, self.engine.resolve_session(session),
                                      user_agent, metadata)
 
     def emulate_locale(self, locale, session=None):
+        self._remember_emulation("emulate_locale", locale=locale, session=session)
         emulation_mod.set_locale(self.cdp, self.engine.resolve_session(session), locale)
 
     def emulate_timezone(self, timezone_id, session=None):
+        self._remember_emulation("emulate_timezone", timezone_id=timezone_id,
+                                 session=session)
         emulation_mod.set_timezone(self.cdp, self.engine.resolve_session(session),
                                    timezone_id)
 
     def emulate_device(self, width, height, mobile=False, scale=1, session=None):
+        self._remember_emulation("emulate_device", width=width, height=height,
+                                 mobile=mobile, scale=scale, session=session)
         emulation_mod.set_device(self.cdp, self.engine.resolve_session(session),
                                  width, height, mobile=mobile, scale=scale)
 
     def clear_emulated_device(self, session=None):
+        self._remember_emulation("clear_emulated_device", session=session)
         emulation_mod.clear_device(self.cdp, self.engine.resolve_session(session))
 
     def set_script_execution(self, enabled, session=None):
         """Watch the page behave with its JS disabled."""
+        self._remember_emulation("set_script_execution", enabled=enabled, session=session)
         emulation_mod.set_script_execution(self.cdp,
                                            self.engine.resolve_session(session), enabled)
 
     # -- resilience & visibility ----------------------------------------------
 
     def reconnect(self, ws_url=None, wait=1.0):
-        """Rebuild the transport after a drop and re-arm everything: hooks
-        (expression-armed ones), boundary probes, blackbox, dialog policy,
-        intercept rules. Corpora and captures survive; heap state and object
-        ids are inherently gone with the old session."""
+        """Rebuild the transport after a drop and re-arm what was set up on it:
+        hooks (expression-armed ones), boundary probes, blackbox, dialog
+        policy, intercept rules, loaded agents, and per-session emulation
+        overrides (UA/locale/timezone/device). Corpora and captures survive;
+        heap state and object ids are inherently gone with the old session."""
         old_hooks = [dict(h) for h in self.tracer.hooks]
         old_pairs = self.tracer.corpora()
         old_captures = self.captures()
@@ -492,6 +517,10 @@ class Session:
         old_probes = list(self.engine.probes)
         old_dialog_policy = self._dialogs.auto
         old_rules = list(self.interceptor.rule_log)
+        old_agents = [(name, source,
+                       self._agents.agents.get(name, {}).get("callback"))
+                      for (name, source) in self.engine.agents]
+        old_emulation = list(self._emulation)
         try:
             self.cdp.close()
         except Exception:
@@ -519,7 +548,20 @@ class Session:
             # the facade's `session` is a url substring; reconnect re-adds to
             # the new page session directly
             self.interceptor.add(self.engine.page_session, pattern, **kwargs)
-        return {"hooked": rehooked, "skipped": skipped, "corpora": self.corpora()}
+        for name, source, callback in old_agents:
+            # re-inject each agent; the engine also re-installs it on every
+            # target it auto-attaches to from here
+            self.load_agent(name, source, on_message=callback)
+        for method, kwargs in old_emulation:
+            # replay overrides in order onto the fresh session
+            try:
+                getattr(self, method)(**kwargs)
+            except Exception:
+                pass
+        return {"hooked": rehooked, "skipped": skipped,
+                "agents": [n for n, _s, _c in old_agents],
+                "emulation": len(old_emulation),
+                "corpora": self.corpora()}
 
     def metrics(self, session=None):
         """Runtime counters: heap sizes, listeners, frames — bloat and loop
@@ -1000,12 +1042,14 @@ class Session:
         return saved
 
     def grep(self, needle, regex=False):
-        """Search hook captures, console, and network records/bodies for a value."""
+        """Search hook captures, console, network records/bodies, and observed
+        Fetch-layer requests (headers + bodies) for a value."""
         needle = str(needle)
         rx = re.compile(needle) if regex else None
         hits = {"hook_captures": [], "pairs": [],
                 "console": self._console.grep(needle, regex=regex),
-                "network": self.network.grep(needle, regex=regex)}
+                "network": self.network.grep(needle, regex=regex),
+                "intercepted": self.interceptor.grep_observed(needle, regex=regex)}
         with self.tracer.lock:
             for rec in self.tracer.captures:
                 if _mentions(rec.get("args"), needle, rx):

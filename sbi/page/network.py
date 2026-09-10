@@ -13,7 +13,10 @@ import threading
 
 
 class Network:
-    MAX_BODY = 256 * 1024
+    MAX_BODY = 256 * 1024       # per-body truncation
+    MAX_RECORDS = 5000          # cap the event tape
+    MAX_BODIES = 500            # cap retained bodies (drain() never clears these)
+    MAX_META = 5000             # cap the requestId -> {url, method} map
 
     def __init__(self, engine, capture_bodies=True):
         self.engine = engine
@@ -44,6 +47,8 @@ class Network:
                 pass
         with self.lock:
             self.meta[rid] = {"url": req.get("url"), "method": req.get("method")}
+            while len(self.meta) > self.MAX_META:
+                self.meta.pop(next(iter(self.meta)), None)   # evict oldest
         self._add({"kind": "request", "session": session_id, "request_id": rid,
                    "url": req.get("url"), "method": req.get("method"),
                    "type": params.get("type"), "post_data": post})
@@ -72,6 +77,8 @@ class Network:
                 body = body[: self.MAX_BODY] + f"...[{len(body)}B truncated]"
             with self.lock:
                 self.bodies[rid] = body
+                while len(self.bodies) > self.MAX_BODIES:
+                    self.bodies.pop(next(iter(self.bodies)), None)   # evict oldest
         except Exception:
             pass
 
@@ -82,6 +89,8 @@ class Network:
             raw = base64.b64decode(b64_text)
             with self.lock:
                 self.raw_bodies[rid] = raw
+                while len(self.raw_bodies) > self.MAX_BODIES:
+                    self.raw_bodies.pop(next(iter(self.raw_bodies)), None)
         except Exception:
             pass
 
@@ -108,6 +117,8 @@ class Network:
     def _add(self, rec):
         with self.lock:
             self.records.append(rec)
+            if len(self.records) > self.MAX_RECORDS:
+                del self.records[:-self.MAX_RECORDS]
 
     def drain(self):
         with self.lock:

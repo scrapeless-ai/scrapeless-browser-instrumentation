@@ -28,9 +28,9 @@ Default rules and their report keys under ``report["doc"]``:
 * ``high_entropy`` -- standalone 20+ char tokens over
   ``[A-Za-z0-9_\\-./+=]`` that mix digits and letters or look base64ish
   (contain ``/``/``+``/``=`` or are 32+ chars) become ``***REDACTED***``.
-  Scanned only inside pair ``input``/``inputs``/``output``/``outputs`` and
-  network ``post_data``/``payload``/``body``/``bodies`` subtrees -- never
-  inside ``stack``/``script``/``fn`` fields -- and URLs, domains, and
+  Scanned inside pair ``input``/``inputs``/``output``/``outputs``, network
+  ``post_data``/``payload``/``body``/``bodies``, and ``headers`` subtrees --
+  never inside ``stack``/``script``/``fn`` fields -- and URLs, domains, and
   hex-only ids shorter than 32 chars are always left alone.
 
 ``extra_patterns`` is a sequence of ``(rule_name, pattern)`` pairs (pattern
@@ -91,6 +91,10 @@ _EMAIL_RE = re.compile(
 _ENTROPY_ON_KEYS = frozenset({
     "input", "inputs", "output", "outputs",
     "post_data", "postdata", "payload", "body", "bodies",
+    # request/response header maps carry signed tokens and custom auth
+    # (x-*-signature, x-api-*, etc.); scan their values too. Bearer/Basic and
+    # cookie header values already have dedicated rules above.
+    "headers", "header",
 })
 _ENTROPY_OFF_KEYS = frozenset({
     "fn", "function", "script", "stack", "stacktrace", "stack_trace",

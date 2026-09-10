@@ -131,6 +131,25 @@ class TestSanitizeDoc(unittest.TestCase):
         self.assertEqual(new_doc["network"][0]["headers"]["x-request-id"],
                          "abc123")
 
+    def test_header_secret_values_are_redacted(self):
+        # signed/custom auth headers (what observed_requests() captures) carry
+        # secrets a Bearer/cookie rule won't catch; header values are scanned
+        # for high-entropy tokens, while UAs and URLs survive.
+        doc = {"network": [{"headers": {
+            "x-dq7hy5l1-a": "Kx9Pq4Wm7Tb3Nc5Jd8Le2fA1b2C3d4E5",   # signature
+            "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "referer": "https://target.example/checkout",
+            "x-request-id": "abc123",
+        }}]}
+        new_doc, report = sanitize_doc(doc)
+        h = new_doc["network"][0]["headers"]
+        self.assertEqual(h["x-dq7hy5l1-a"], sanitize.REDACTED)     # redacted
+        self.assertEqual(h["user-agent"],
+                         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+        self.assertEqual(h["referer"], "https://target.example/checkout")
+        self.assertEqual(h["x-request-id"], "abc123")             # short id kept
+        self.assertGreaterEqual(report["doc"]["high_entropy"], 1)
+
     def test_report_counts(self):
         _new_doc, report = sanitize_doc(make_artifact())
         self.assertEqual(report["doc"], {"query_param": 3, "auth": 1,

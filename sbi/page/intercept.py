@@ -19,6 +19,9 @@ import fnmatch
 import re
 import threading
 
+MAX_OBSERVED = 500              # cap the observation tape
+MAX_BODY = 256 * 1024           # truncate large post bodies, like Network capture
+
 
 class Interceptor:
     def __init__(self, cdp):
@@ -28,6 +31,11 @@ class Interceptor:
         self.rules = {}          # sid -> [rule dicts, in order]
         self.rule_log = []       # (pattern, kwargs) — replayed on reconnect
         self._enabled = set()
+        # Fetch.requestPaused carries the REAL request headers and body — a
+        # different capture point than the Network domain, so it still sees
+        # them when a gateway strips Network-domain output. Record every pause
+        # here so a passthrough rule doubles as an observer.
+        self.observed = []       # [{session,stage,url,method,headers,post_data,...}]
         cdp.on("Fetch.requestPaused", self._paused)
 
     def add(self, sid, pattern, status=200, body="", headers=None,
@@ -73,6 +81,56 @@ class Interceptor:
         with self.lock:
             self._enabled.add(sid)
 
+    def _record(self, params, sid, stage):
+        """Capture what a pause reveals about the request — headers and body
+        included — before any rule mutates or forwards it."""
+        req = params.get("request") or {}
+        rec = {"session": sid, "stage": stage,
+               "url": req.get("url", ""), "method": req.get("method", ""),
+               "headers": dict(req.get("headers") or {}),
+               "post_data": req.get("postData"),
+               "resource_type": params.get("resourceType")}
+        # the body isn't always inlined (large/multipart) — recover it once,
+        # only at the request stage where getRequestPostData is valid
+        if stage == "request" and rec["post_data"] is None and req.get("hasPostData"):
+            try:
+                r = self.cdp.send("Fetch.getRequestPostData",
+                                  {"requestId": params.get("requestId")},
+                                  session_id=sid, timeout=10)
+                rec["post_data"] = r.get("postData")
+            except Exception:
+                pass
+        body = rec["post_data"]
+        if isinstance(body, str) and len(body) > MAX_BODY:
+            rec["post_data"] = body[:MAX_BODY] + f"...[{len(body)}B truncated]"
+        with self.lock:
+            self.observed.append(rec)
+            if len(self.observed) > MAX_OBSERVED:
+                del self.observed[:-MAX_OBSERVED]
+
+    def drain_observed(self):
+        """Read and clear the observed-request tape."""
+        with self.lock:
+            out, self.observed = self.observed, []
+        return out
+
+    def grep_observed(self, needle, regex=False):
+        """Non-destructive search over observed URLs, methods, headers and
+        bodies — recovers request-side values a Network-domain grep can't see."""
+        needle = str(needle)
+        rx = re.compile(needle) if regex else None
+        with self.lock:
+            records = list(self.observed)
+        out = []
+        for rec in records:
+            hay = " ".join([rec.get("url", ""), rec.get("method", ""),
+                            rec.get("post_data") or "",
+                            " ".join(f"{k}: {v}" for k, v
+                                     in (rec.get("headers") or {}).items())])
+            if (rx.search(hay) if rx else needle in hay):
+                out.append(rec)
+        return out
+
     def _match(self, sid, url, stage):
         with self.lock:
             rules = list(self.rules.get(sid, []))
@@ -111,6 +169,10 @@ class Interceptor:
         url = (params.get("request") or {}).get("url", "")
         # response-stage pauses fire with responseStatusCode/responseHeaders
         stage = "response" if params.get("responseStatusCode") is not None else "request"
+        try:
+            self._record(params, sid, stage)   # observe before we forward/mutate
+        except Exception:
+            pass                               # recording must never break interception
         rule = self._match(sid, url, stage)
         try:
             if rule is None or rule["passthrough"]:

@@ -371,6 +371,88 @@ class Live(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+    def test_interceptor_records_request_headers_and_body(self):
+        # Fetch.requestPaused carries the real request headers and body — a
+        # different capture point than the Network domain — so a passthrough
+        # rule must record them. This recovers signed headers and form fields
+        # a gateway strips from Network-domain output (the reason network
+        # capture alone shows 0 headers).
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Quiet(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+            def log_message(self, *a):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+        srv.daemon_threads = True
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            s = self._session()
+            s.navigate(base + "/")           # a real origin: same-origin POST, no CORS preflight
+            s.wait(0.4)
+            s.intercept("*", passthrough=True)   # arm the Fetch layer before the POST
+            s.wait(0.3)
+            s.eval('fetch("%s/collect", {method: "POST",'
+                   ' headers: {"X-DQ7Hy5L1-test": "sig_live"},'
+                   ' body: "a0=tok_zoe&X-DQ7Hy5L1-f1=zzz"}).catch(function () {})' % base)
+            got = None
+            for _ in range(24):
+                s.wait(0.25)
+                posts = [o for o in s.interceptor.observed
+                         if o["method"] == "POST" and "/collect" in o["url"]]
+                if posts:
+                    got = posts[0]
+                    break
+            self.assertIsNotNone(got, "POST never observed at the Fetch layer")
+            headers = {k.lower(): v for k, v in got["headers"].items()}
+            self.assertEqual(headers.get("x-dq7hy5l1-test"), "sig_live", got)
+            self.assertIn("a0=tok_zoe", got.get("post_data") or "")
+            self.assertIn("X-DQ7Hy5L1-f1=zzz", got.get("post_data") or "")
+            # grep surfaces it the same way it surfaces network records
+            self.assertTrue(s.grep("tok_zoe")["intercepted"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_reconnect_restores_agents(self):
+        # a loaded agent (e.g. a hardened tracer) must survive a transport drop:
+        # reconnect() re-injects it, or a single websocket blip silently kills it
+        s = self._session()
+        s.load_agent("beat", "rpc.ping = () => 'pong';")
+        s.wait(0.3)
+        self.assertEqual(s.call_agent("beat", "ping"), "pong")
+        r = s.reconnect()
+        self.assertIn("beat", r.get("agents", []), r)
+        s.wait(0.3)
+        self.assertIn("beat", [n for n, _src in s.engine.agents])
+        self.assertEqual(s.call_agent("beat", "ping"), "pong")   # restored + functional
+
+    def test_reconnect_restores_emulation(self):
+        # per-session overrides (here a timezone) must be replayed onto the
+        # fresh session, or they silently vanish on a transport drop
+        s = self._session()
+        s.emulate_timezone("Asia/Tokyo")
+        s.wait(0.2)
+        self.assertEqual(s.eval("new Date().getTimezoneOffset()"), -540)  # UTC+9
+        r = s.reconnect()
+        self.assertEqual(r.get("emulation"), 1, r)
+        s.wait(0.3)
+        self.assertEqual(s.eval("new Date().getTimezoneOffset()"), -540)  # survived
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

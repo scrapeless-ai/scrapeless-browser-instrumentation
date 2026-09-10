@@ -10,6 +10,8 @@ hooks and network like any other source.
 
 import threading
 
+MAX_RECORDS = 2000      # cap the tape: hostile SDKs can spam console endlessly
+
 
 def _arg_text(ro):
     if "value" in ro:
@@ -45,6 +47,8 @@ class Console:
     def _add(self, rec):
         with self.lock:
             self.records.append(rec)
+            if len(self.records) > MAX_RECORDS:
+                del self.records[:-MAX_RECORDS]
 
     def drain(self):
         with self.lock:
